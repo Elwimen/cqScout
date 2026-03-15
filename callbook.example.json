@@ -1,0 +1,29 @@
+[
+  {
+    "callsign": "9A0AA",
+    "name": "Radioklub Example",
+    "address": {
+      "street": "Primjer 1",
+      "postal_code": "10000",
+      "city": "Zagreb"
+    },
+    "duplicate": false
+  },
+  {
+    "callsign": "9A1BB",
+    "name": "Ivan Horvat",
+    "address": {
+      "street": "Ulica 5",
+      "city": "Split"
+    },
+    "duplicate": false
+  },
+  {
+    "callsign": "9A2CC",
+    "name": "Marija Kovač",
+    "address": {
+      "raw": "Trg 3, Rijeka"
+    },
+    "duplicate": false
+  }
+]

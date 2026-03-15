@@ -1,0 +1,16 @@
+# private data — never commit
+callbook.json
+
+# generated outputs
+*.txt
+*.csv
+*.md
+!README.md
+!callbook.example.json
+
+# python
+__pycache__/
+*.py[cod]
+
+# tool state
+.claude/
