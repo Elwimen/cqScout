@@ -73,6 +73,27 @@ MORSE = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Leet-speak digit → letter mapping
+# ---------------------------------------------------------------------------
+
+LEET: dict[str, list[str]] = {
+    # digits → letters they visually resemble
+    '0': ['O'],
+    '1': ['I', 'L'],
+    '2': ['R', 'Z'],
+    '3': ['E', 'B'],   # 3 looks like E; reversed 3 looks like B
+    '4': ['A'],
+    '5': ['S'],
+    '6': ['G', 'B'],
+    '7': ['T', 'L', 'Y'],  # 7 → T (crossbar), L and Y also map to 7 in leet
+    '8': ['B'],
+    '9': ['G', 'Q', 'P'],  # 9 resembles g, q, and p
+    # letters → diacritic variants (language-specific)
+    'C': ['Ć', 'Č'],
+}
+
+
 def nato_score(callsign: str) -> int:
     """Total character count of all NATO phonetic words."""
     return sum(len(NATO[c]) for c in callsign if c in NATO)
@@ -100,6 +121,84 @@ def nato_spelling(callsign: str) -> str:
 
 def morse_spelling(callsign: str) -> str:
     return " ".join(MORSE.get(c, c) for c in callsign)
+
+
+# ---------------------------------------------------------------------------
+# Word matching via leet-speak
+# ---------------------------------------------------------------------------
+
+# Reverse leet: letter → set of callsign chars (itself + digits that expand to it)
+_REVERSE_LEET: dict[str, set[str]] = {c: {c} for c in 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'}
+for _digit, _letters in LEET.items():
+    for _letter in _letters:
+        _REVERSE_LEET.setdefault(_letter, {_letter}).add(_digit)
+
+
+def expand_leet(segment: str) -> list[str]:
+    """All word strings obtainable from a callsign segment by leet substitution."""
+    if not segment:
+        return ['']
+    char, rest = segment[0], segment[1:]
+    suffixes = expand_leet(rest)
+    letters = LEET[char] if char in LEET else [char]
+    return [l + s for l in letters for s in suffixes]
+
+
+def load_wordlist(path: str, min_len: int = 3, max_len: int = 6) -> set[str]:
+    """Load a word list file; return uppercase words within the given length range.
+
+    Accepts any word whose every character has a reverse-leet mapping (i.e. can be
+    represented by a callsign character), so Croatian diacritics like Č/Ć are included
+    as long as they appear in LEET.
+    """
+    words: set[str] = set()
+    with open(path, encoding='utf-8', errors='ignore') as f:
+        for line in f:
+            w = line.strip().upper()
+            if w and w.isalpha() and min_len <= len(w) <= max_len and all(c in _REVERSE_LEET for c in w):
+                words.add(w)
+    return words
+
+
+def build_word_index(wordset: set[str]) -> dict[str, list[str]]:
+    """
+    Build a reverse index: callsign_segment → list of words it decodes to.
+
+    For each word, generates all callsign segment strings (via reverse leet) that
+    would expand back to that word. Looking up a callsign window in the index is
+    O(1) rather than requiring per-callsign leet expansion.
+    """
+    index: dict[str, list[str]] = {}
+    for word in wordset:
+        # Generate all callsign-character representations of this word
+        segs = ['']
+        for ch in word:
+            cs_chars = sorted(_REVERSE_LEET.get(ch, {ch}))
+            segs = [s + c for s in segs for c in cs_chars]
+        for seg in segs:
+            index.setdefault(seg, []).append(word)
+    return index
+
+
+def callsign_words(callsign: str, word_index: dict[str, list[str]],
+                   min_len: int = 3, max_len: int = 6,
+                   anchor_left: bool = False, anchor_right: bool = False) -> list[str]:
+    """Return sorted list of unique words from sliding windows of the callsign.
+
+    anchor_left:  word must start at position 0.
+    anchor_right: word must end at the last character.
+    """
+    found: set[str] = set()
+    n = len(callsign)
+    starts = range(0, 1) if anchor_left else range(n)
+    for start in starts:
+        for length in range(min_len, min(max_len + 1, n - start + 1)):
+            if anchor_right and start + length != n:
+                continue
+            segment = callsign[start:start + length]
+            for word in word_index.get(segment, []):
+                found.add(word)
+    return sorted(found)
 
 
 # ---------------------------------------------------------------------------
@@ -280,9 +379,9 @@ def main():
     )
     parser.add_argument(
         "--sort",
-        choices=["call", "nato", "morse", "overall"],
-        metavar="{call,nato,morse,overall}",
-        help="Sort by: call (alphabetical), nato (phonetic length), morse (tx time), overall (nato+morse)",
+        choices=["call", "nato", "morse", "overall", "word"],
+        metavar="{call,nato,morse,overall,word}",
+        help="Sort by: call (alphabetical), nato (phonetic length), morse (tx time), overall (nato+morse), word (first matched word)",
     )
     parser.add_argument(
         "--prefix",
@@ -330,8 +429,56 @@ def main():
         metavar="FILE",
         help="Write results as CSV to FILE",
     )
+    parser.add_argument(
+        "--words",
+        nargs="+",
+        metavar="FILE",
+        help="Word list files (one word per line). Show only callsigns that spell a word.",
+    )
+    parser.add_argument(
+        "--word-len",
+        nargs="+",
+        type=int,
+        metavar="N",
+        default=[3, 6],
+        help="Word length filter: one value for exact length, two for N–M range (default: 3 6).",
+    )
+    parser.add_argument(
+        "--word-left",
+        action="store_true",
+        help="Word must start at the first character of the callsign.",
+    )
+    parser.add_argument(
+        "--word-right",
+        action="store_true",
+        help="Word must end at the last character of the callsign.",
+    )
     argcomplete.autocomplete(parser)
     args = parser.parse_args()
+
+    wlen = args.word_len
+    if len(wlen) == 1:
+        min_wlen, max_wlen = wlen[0], wlen[0]
+    elif len(wlen) == 2:
+        min_wlen, max_wlen = wlen[0], wlen[1]
+    else:
+        print("Error: --word-len accepts 1 or 2 values", file=sys.stderr)
+        sys.exit(1)
+    if not (1 <= min_wlen <= max_wlen <= 20):
+        print("Error: --word-len values must satisfy 1 ≤ N ≤ M ≤ 20", file=sys.stderr)
+        sys.exit(1)
+
+    wordset: set[str] = set()
+    if args.words:
+        for path in args.words:
+            try:
+                wordset |= load_wordlist(path, min_wlen, max_wlen)
+            except OSError as e:
+                print(f"Error loading word list {path}: {e}", file=sys.stderr)
+                sys.exit(1)
+        word_index = build_word_index(wordset)
+    else:
+        word_index: dict[str, list[str]] = {}
 
     try:
         all_callsigns = generate_from_pattern(args.pattern)
@@ -393,13 +540,21 @@ def main():
         else:
             sort_by = "call"
 
+    def word_sort_key(cs: str) -> tuple:
+        words = callsign_words(cs, word_index, min_wlen, max_wlen, args.word_left, args.word_right)
+        return (words[0] if words else "", cs)
+
     sort_keys = {
         "call":    lambda cs: cs,
         "nato":    lambda cs: (nato_score(cs), cs),
         "morse":   lambda cs: (morse_score(cs), cs),
         "overall": lambda cs: (nato_score(cs) + morse_score(cs), cs),
+        "word":    word_sort_key,
     }
     results = sorted(results, key=sort_keys[sort_by])
+
+    if word_index:
+        results = [cs for cs in results if callsign_words(cs, word_index, min_wlen, max_wlen, args.word_left, args.word_right)]
 
     if args.top:
         results = results[:args.top]
@@ -415,7 +570,10 @@ def main():
         else []
     )
 
-    header_cols = ["Callsign", "Status", "NATO", "Morse", "Score NATO", "Score Morse", "Overall"]
+    header_cols = ["Callsign"]
+    if word_index:
+        header_cols.append("Words")
+    header_cols += ["Status", "NATO", "Morse", "Score NATO", "Score Morse", "Overall"]
     if args.owner:
         header_cols.append("Owner")
     HEADER = tuple(header_cols)
@@ -426,8 +584,10 @@ def main():
         ms = morse_score(cs)
         if status is None:
             status = "free" if cs not in taken else "taken"
-        cells = [
-            cs,
+        cells = [cs]
+        if word_index:
+            cells.append(", ".join(callsign_words(cs, word_index, min_wlen, max_wlen, args.word_left, args.word_right)) or "—")
+        cells += [
             status,
             nato_spelling(cs),
             morse_spelling(cs),
@@ -441,18 +601,23 @@ def main():
         return tuple(cells)
 
     def write_md(f):
-        def fmt(cells):
-            return "| " + " | ".join(cells) + " |"
-        f.write(fmt(HEADER) + "\n")
-        f.write(fmt(SEP)    + "\n")
-        for cs in results:
-            f.write(fmt(row(cs)) + "\n")
+        def aligned_fmt(all_rows):
+            widths = [max(len(r[i]) for r in all_rows) for i in range(len(all_rows[0]))]
+            def fmt(cells):
+                padded = [c.ljust(widths[i]) for i, c in enumerate(cells)]
+                return "| " + " | ".join(padded) + " |"
+            return fmt
+
+        main_rows = [HEADER, SEP] + [row(cs) for cs in results]
+        fmt = aligned_fmt(main_rows)
+        for r in main_rows:
+            f.write(fmt(r) + "\n")
         if others:
             f.write(f"\n**Others ({len(others)} taken outside filter)**\n\n")
-            f.write(fmt(HEADER) + "\n")
-            f.write(fmt(SEP)    + "\n")
-            for cs in others:
-                f.write(fmt(row(cs, status="other")) + "\n")
+            other_rows = [HEADER, SEP] + [row(cs, status="other") for cs in others]
+            fmt2 = aligned_fmt(other_rows)
+            for r in other_rows:
+                f.write(fmt2(r) + "\n")
 
     def write_csv(f):
         writer = csv.writer(f)
