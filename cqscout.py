@@ -36,7 +36,7 @@ with warnings.catch_warnings():
     import sre_parse
 
 CALLBOOK = "callbook.json"
-DEFAULT_PATTERN = r"9A[1-9][A-Z]{1,3}"
+DEFAULT_PATTERN = r"9A[0-9][A-Z]{1,3}"
 
 # ---------------------------------------------------------------------------
 # NATO phonetic alphabet (ITU standard)
